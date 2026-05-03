@@ -39,6 +39,12 @@ class GlitchComponent(wiring.Component):
     # --- Host-controlled (In) ---
     arm:         In(1)
     polarity:    In(1)                       # 0 = active-high pulse, 1 = active-low
+    open_drain:  In(1)                       # 1 = emulate open-drain (drive only
+                                             # during pulse, tristate at idle); 0 =
+                                             # push-pull (always drive). Used to
+                                             # interface cleanly with the
+                                             # ChipShouter active-low HW TRIG input
+                                             # which has its own pull-up.
     pattern:     In(MAX_PATTERN_LEN * 8)     # packed: bytes[0] at MSB, see README
     pattern_len: In(range(MAX_PATTERN_LEN + 1))
     manual_cyc:  In(20)                      # UART bit period in sys clocks
@@ -64,9 +70,17 @@ class GlitchComponent(wiring.Component):
         m = Module()
 
         # -------- Trigger output pin --------
-        m.submodules.trigger_buf = trigger_buf = io.Buffer("o", self.ports.trigger)
+        # "oe" so we can implement an open-drain mode: the FPGA only actively
+        # drives the line during the pulse, otherwise the buffer is high-Z and
+        # an external pull-up (or pull-down) sets the idle level. In push-pull
+        # mode (open_drain=0) the output is always enabled, matching the
+        # original behavior.
+        m.submodules.trigger_buf = trigger_buf = io.Buffer("io", self.ports.trigger)
         trigger_active = Signal()   # logically active-high; polarity applied at pin
-        m.d.comb += trigger_buf.o.eq(trigger_active ^ self.polarity)
+        m.d.comb += [
+            trigger_buf.o.eq(trigger_active ^ self.polarity),
+            trigger_buf.oe.eq(trigger_active | ~self.open_drain),
+        ]
 
         # -------- UART receiver (stock Glasgow gateware) --------
         # bit_cyc sized to the full range of manual_cyc so the host can reload it

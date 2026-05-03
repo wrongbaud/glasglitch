@@ -46,6 +46,7 @@ class GlitchInterface:
         # Config registers (host writes).
         self._arm         = assembly.add_rw_register(component.arm)
         self._polarity    = assembly.add_rw_register(component.polarity)
+        self._open_drain  = assembly.add_rw_register(component.open_drain)
         self._pattern     = assembly.add_rw_register(component.pattern)
         self._pattern_len = assembly.add_rw_register(component.pattern_len)
         self._manual_cyc  = assembly.add_rw_register(component.manual_cyc)
@@ -106,6 +107,13 @@ class GlitchInterface:
     async def set_polarity(self, active_low: bool) -> None:
         """0 / False = active-high pulse (idle low). 1 / True = active-low (idle high)."""
         await self._polarity.set(int(bool(active_low)))
+
+    async def set_open_drain(self, open_drain: bool) -> None:
+        """0 / False = push-pull (always drive). 1 / True = emulate open-drain
+        (drive only during pulse, tri-state at idle). Useful when the receiver
+        has its own pull-up and would contend with an active CMOS drive — e.g.
+        the ChipShouter active-low HW TRIG input."""
+        await self._open_drain.set(int(bool(open_drain)))
 
     @property
     def sys_clk_period(self) -> float:

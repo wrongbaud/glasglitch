@@ -58,10 +58,17 @@ class GlitchApplet(GlasgowAppletV2):
             "--active-low", action="store_true", default=False,
             help="invert trigger polarity (idle high, pulse low) — common for "
                  "P-channel MOSFET crowbar drivers")
+        parser.add_argument(
+            "--open-drain", action="store_true", default=False,
+            help="emulate open-drain output: drive only during the pulse, "
+                 "tri-state at idle. Use when the receiver has its own pull-up "
+                 "(e.g. ChipShouter active-low HW TRIG) so a CMOS push-pull "
+                 "drive doesn't contend with it.")
 
     async def setup(self, args):
         await self.glitch_iface.set_baud(args.baud)
         await self.glitch_iface.set_polarity(args.active_low)
+        await self.glitch_iface.set_open_drain(args.open_drain)
 
     # ------------------------------------------------------------------
     # Run: per-invocation operations.
