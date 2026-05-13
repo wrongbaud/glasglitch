@@ -37,19 +37,26 @@ class GlitchComponent(wiring.Component):
     """
 
     # --- Host-controlled (In) ---
-    arm:         In(1)
-    polarity:    In(1)                       # 0 = active-high pulse, 1 = active-low
-    open_drain:  In(1)                       # 1 = emulate open-drain (drive only
+    arm:          In(1)
+    polarity:     In(1)                      # 0 = active-high pulse, 1 = active-low
+    open_drain:   In(1)                      # 1 = emulate open-drain (drive only
                                              # during pulse, tristate at idle); 0 =
                                              # push-pull (always drive). Used to
                                              # interface cleanly with the
                                              # ChipShouter active-low HW TRIG input
                                              # which has its own pull-up.
-    pattern:     In(MAX_PATTERN_LEN * 8)     # packed: bytes[0] at MSB, see README
-    pattern_len: In(range(MAX_PATTERN_LEN + 1))
-    manual_cyc:  In(20)                      # UART bit period in sys clocks
-    delay_cyc:   In(32)                      # cycles between match and pulse rise
-    pulse_cyc:   In(32)                      # pulse width in cycles
+    reset_assert: In(1)                      # 1 = drive reset pin low (assert reset
+                                             # to the target); 0 = drive high
+                                             # (release). Only wired to a physical
+                                             # pin if the applet was built with
+                                             # has_reset=True (the gateware register
+                                             # exists either way; writes are no-ops
+                                             # when no pin is wired).
+    pattern:      In(MAX_PATTERN_LEN * 8)    # packed: bytes[0] at MSB, see README
+    pattern_len:  In(range(MAX_PATTERN_LEN + 1))
+    manual_cyc:   In(20)                     # UART bit period in sys clocks
+    delay_cyc:    In(32)                     # cycles between match and pulse rise
+    pulse_cyc:    In(32)                     # pulse width in cycles
 
     # --- Host-observable (Out) ---
     state:       Out(3)
@@ -60,10 +67,15 @@ class GlitchComponent(wiring.Component):
     rx_stream:   Out(stream.Signature(8))
     rx_flush:    Out(1)
 
-    def __init__(self, ports):
+    def __init__(self, ports, *, has_reset: bool = False):
         # `ports` is a port group with `.rx` (UART input) and `.trigger`
-        # (glitch output). `.tx` may be present but is unused.
+        # (glitch output). `.tx` may be present but is unused. When
+        # `has_reset=True`, `ports.reset` is also expected — a third
+        # output that the host can pulse low via the reset_assert
+        # register (used by boot-time EMFI campaigns to reset the target
+        # and trigger on its boot-banner UART output).
         self.ports = ports
+        self.has_reset = has_reset
         super().__init__()
 
     def elaborate(self, platform):
@@ -81,6 +93,19 @@ class GlitchComponent(wiring.Component):
             trigger_buf.o.eq(trigger_active ^ self.polarity),
             trigger_buf.oe.eq(trigger_active | ~self.open_drain),
         ]
+
+        # -------- Reset output pin (optional) --------
+        # Active-low at the pad: reset_assert=1 → pin low (target held in
+        # reset); reset_assert=0 → pin high (target running). Push-pull
+        # (always driven) so the line has a clean idle-high state immediately
+        # after FPGA configuration — no race where the target boots before
+        # we've driven the line.
+        if self.has_reset:
+            m.submodules.reset_buf = reset_buf = io.Buffer("io", self.ports.reset)
+            m.d.comb += [
+                reset_buf.o.eq(~self.reset_assert),
+                reset_buf.oe.eq(1),
+            ]
 
         # -------- UART receiver (stock Glasgow gateware) --------
         # bit_cyc sized to the full range of manual_cyc so the host can reload it

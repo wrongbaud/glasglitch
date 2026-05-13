@@ -38,12 +38,19 @@ class GlitchApplet(GlasgowAppletV2):
             help="UART RX pin to monitor (target TX)")
         access.add_pins_argument(parser, "trigger", default=True, required=True,
             help="glitch trigger output pin")
+        access.add_pins_argument(parser, "reset", default=None, required=False,
+            help="optional target reset output pin (active-low, push-pull). "
+                 "Used by boot-time EMFI campaigns to reset the target and "
+                 "trigger on its boot-banner UART output. Omit for plain "
+                 "UART-triggered glitch operation.")
 
     def build(self, args):
         with self.assembly.add_applet(self):
             self.assembly.use_voltage(args.voltage)
             self.glitch_iface = GlitchInterface(
-                self.logger, self.assembly, rx=args.rx, trigger=args.trigger)
+                self.logger, self.assembly,
+                rx=args.rx, trigger=args.trigger,
+                reset=getattr(args, "reset", None))
 
     # ------------------------------------------------------------------
     # Setup: runtime config that doesn't vary per-shot (baud, polarity).

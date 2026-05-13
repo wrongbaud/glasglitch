@@ -32,16 +32,23 @@ class GlitchInterface:
     """Runtime control surface for the UART-triggered glitch generator."""
 
     def __init__(self, logger: logging.Logger, assembly: AbstractAssembly, *,
-                 rx: GlasgowPin, trigger: GlasgowPin):
+                 rx: GlasgowPin, trigger: GlasgowPin,
+                 reset: Optional[GlasgowPin] = None):
         self._logger = logger
         self._sys_clk_period = assembly.sys_clk_period
+        self._has_reset = reset is not None
 
         # UART RX idles high; pull it high so an unconnected input doesn't
-        # continuously register start bits.
-        ports = assembly.add_port_group(rx=rx, trigger=trigger)
+        # continuously register start bits. The reset pin (when used) is
+        # driven push-pull from the gateware so we don't need a pull.
+        port_kwargs = {"rx": rx, "trigger": trigger}
+        if reset is not None:
+            port_kwargs["reset"] = reset
+        ports = assembly.add_port_group(**port_kwargs)
         assembly.use_pulls({rx: "high"})
 
-        component = assembly.add_submodule(GlitchComponent(ports))
+        component = assembly.add_submodule(
+            GlitchComponent(ports, has_reset=self._has_reset))
 
         # Config registers (host writes).
         self._arm         = assembly.add_rw_register(component.arm)
@@ -52,6 +59,12 @@ class GlitchInterface:
         self._manual_cyc  = assembly.add_rw_register(component.manual_cyc)
         self._delay_cyc   = assembly.add_rw_register(component.delay_cyc)
         self._pulse_cyc   = assembly.add_rw_register(component.pulse_cyc)
+        # reset_assert register always exists at the gateware level; we only
+        # bind a host-visible register for it when a reset pin was wired in.
+        # Writes are no-ops when has_reset=False (no physical pin to drive).
+        self._reset_assert = (
+            assembly.add_rw_register(component.reset_assert)
+            if self._has_reset else None)
 
         # Status registers (host reads).
         self._state       = assembly.add_ro_register(component.state)
@@ -118,6 +131,52 @@ class GlitchInterface:
     @property
     def sys_clk_period(self) -> float:
         return self._sys_clk_period
+
+    @property
+    def has_reset(self) -> bool:
+        return self._has_reset
+
+    # ------------------------------------------------------------------
+    # Reset pin (optional — only available when the applet was built
+    # with --reset PIN). Host-timed pulse: deterministic to within
+    # asyncio.sleep granularity (~1 ms), which is fine for typical reset
+    # synchronizer requirements (<< 100 µs).
+    # ------------------------------------------------------------------
+
+    async def pulse_reset(self, duration_us: int) -> None:
+        """Drive the reset pin low for `duration_us`, release, return.
+
+        Blocking: this call returns only after the pin has been released,
+        so the caller can assume the target is just starting its boot
+        cycle when this returns. The gateware register controls the pin
+        directly; timing is host-clock driven via asyncio.sleep.
+
+        Raises if no reset pin was configured at build time.
+        """
+        if self._reset_assert is None:
+            raise GlasgowAppletError(
+                "pulse_reset called but no reset pin was configured at "
+                "applet build time — pass --reset PIN to the applet")
+        await self._reset_assert.set(1)
+        await asyncio.sleep(duration_us / 1_000_000)
+        await self._reset_assert.set(0)
+
+    async def assert_reset(self) -> None:
+        """Hold reset low indefinitely. Use for setup sequences where you
+        want to keep the target in reset while configuring other things;
+        release with `release_reset`. `pulse_reset` is preferred for
+        normal use."""
+        if self._reset_assert is None:
+            raise GlasgowAppletError(
+                "assert_reset called but no reset pin was configured")
+        await self._reset_assert.set(1)
+
+    async def release_reset(self) -> None:
+        """Release a previously-asserted reset (drive pin high)."""
+        if self._reset_assert is None:
+            raise GlasgowAppletError(
+                "release_reset called but no reset pin was configured")
+        await self._reset_assert.set(0)
 
     # ------------------------------------------------------------------
     # Arm / poll / fire

@@ -167,6 +167,50 @@ class GlitchAppletTestCase(GlasgowAppletV2TestCase, applet=GlitchApplet):
         self.assertGreaterEqual(low_cycles, PULSE_CYC)
         self.assertEqual(ctx.get(trig.o), 1)       # back to idle (high)
 
+    @applet_v2_simulation_test(prepare=_prepare_idle_rx,
+        args="--rx A0 --trigger A1 --reset A2 --baud 9600")
+    async def test_reset_pin_pulses(self, applet, ctx):
+        """Verify the optional reset pin: idle high, drives low when
+        reset_assert is set, returns high when cleared. Driven push-pull
+        (oe always asserted), active-low at the pad."""
+        iface = applet.glitch_iface
+        asm   = applet.assembly
+        rst   = asm.get_pin("A2")
+
+        self.assertTrue(iface.has_reset)
+
+        # Idle state: high (reset_assert=0 → ~reset_assert=1 at pad)
+        await ctx.tick()
+        self.assertEqual(ctx.get(rst.o), 1)
+        self.assertEqual(ctx.get(rst.oe), 1)
+
+        # Drive a 100-cycle low pulse via the register directly (we don't
+        # use pulse_reset() here because asyncio.sleep doesn't compose
+        # with the simulation clock). Time-domain correctness of the
+        # asyncio.sleep wrapping is covered by the hardware bring-up test
+        # in the harness.
+        await iface.assert_reset()
+        for _ in range(100):
+            await ctx.tick()
+            self.assertEqual(ctx.get(rst.o), 0)
+
+        # Release: pin goes high
+        await iface.release_reset()
+        await ctx.tick()
+        self.assertEqual(ctx.get(rst.o), 1)
+
+    @applet_v2_simulation_test(prepare=_prepare_idle_rx, args="--rx A0 --trigger A1 --baud 9600")
+    async def test_no_reset_pin_when_not_configured(self, applet, ctx):
+        """If --reset is omitted at build time, the interface reports
+        has_reset=False and the reset methods raise."""
+        iface = applet.glitch_iface
+        self.assertFalse(iface.has_reset)
+        from glasgow.applet import GlasgowAppletError
+        with self.assertRaises(GlasgowAppletError):
+            await iface.pulse_reset(1000)
+        with self.assertRaises(GlasgowAppletError):
+            await iface.assert_reset()
+
     @applet_v2_simulation_test(prepare=_prepare_idle_rx, args="--rx A0 --trigger A1 --baud 9600")
     async def test_disarm_returns_to_idle(self, applet, ctx):
         iface = applet.glitch_iface
