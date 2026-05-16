@@ -46,12 +46,23 @@ class GlitchComponent(wiring.Component):
                                              # ChipShouter active-low HW TRIG input
                                              # which has its own pull-up.
     reset_assert: In(1)                      # 1 = drive reset pin low (assert reset
-                                             # to the target); 0 = drive high
-                                             # (release). Only wired to a physical
+                                             # to the target); 0 = release per
+                                             # reset_idle_z. Only wired to a physical
                                              # pin if the applet was built with
                                              # has_reset=True (the gateware register
                                              # exists either way; writes are no-ops
                                              # when no pin is wired).
+    reset_idle_z: In(1)                      # idle (reset_assert=0) behavior of the
+                                             # reset pin: 0 = drive HIGH push-pull
+                                             # (legacy default — gives a clean
+                                             # idle-high state at FPGA bring-up but
+                                             # can fight an external reset driver
+                                             # like the AP's GSC reset controller);
+                                             # 1 = release to high-Z and let an
+                                             # external pull-up / driver set the
+                                             # idle level. Has no effect when
+                                             # reset_assert=1 (the assertion always
+                                             # actively drives low).
     pattern:      In(MAX_PATTERN_LEN * 8)    # packed: bytes[0] at MSB, see README
     pattern_len:  In(range(MAX_PATTERN_LEN + 1))
     manual_cyc:   In(20)                     # UART bit period in sys clocks
@@ -95,16 +106,25 @@ class GlitchComponent(wiring.Component):
         ]
 
         # -------- Reset output pin (optional) --------
-        # Active-low at the pad: reset_assert=1 → pin low (target held in
-        # reset); reset_assert=0 → pin high (target running). Push-pull
-        # (always driven) so the line has a clean idle-high state immediately
-        # after FPGA configuration — no race where the target boots before
-        # we've driven the line.
+        # Active-low at the pad. reset_assert=1 → drive LOW (target held in
+        # reset) regardless of reset_idle_z. reset_assert=0 → idle behavior
+        # is set by reset_idle_z:
+        #   reset_idle_z=0 (default): drive HIGH push-pull. Gives a clean
+        #     idle-high state immediately after FPGA configuration with no
+        #     race where the target boots before we've driven the line, but
+        #     contends with any external reset driver (e.g. the AP's GSC
+        #     reset controller) and can wedge a target whose reset is
+        #     shared with the host SoC.
+        #   reset_idle_z=1: release to high-Z. The line floats unless an
+        #     external pull-up or another driver holds it high. Required
+        #     when sharing the reset net with another asserter — including
+        #     idle/post-test states, since the gateware stays configured
+        #     until USB teardown.
         if self.has_reset:
             m.submodules.reset_buf = reset_buf = io.Buffer("io", self.ports.reset)
             m.d.comb += [
                 reset_buf.o.eq(~self.reset_assert),
-                reset_buf.oe.eq(1),
+                reset_buf.oe.eq(self.reset_assert | ~self.reset_idle_z),
             ]
 
         # -------- UART receiver (stock Glasgow gateware) --------

@@ -59,11 +59,15 @@ class GlitchInterface:
         self._manual_cyc  = assembly.add_rw_register(component.manual_cyc)
         self._delay_cyc   = assembly.add_rw_register(component.delay_cyc)
         self._pulse_cyc   = assembly.add_rw_register(component.pulse_cyc)
-        # reset_assert register always exists at the gateware level; we only
-        # bind a host-visible register for it when a reset pin was wired in.
-        # Writes are no-ops when has_reset=False (no physical pin to drive).
+        # reset_assert / reset_idle_z registers always exist at the gateware
+        # level; we only bind host-visible registers when a reset pin was
+        # wired in. Writes are no-ops when has_reset=False (no physical pin
+        # to drive).
         self._reset_assert = (
             assembly.add_rw_register(component.reset_assert)
+            if self._has_reset else None)
+        self._reset_idle_z = (
+            assembly.add_rw_register(component.reset_idle_z)
             if self._has_reset else None)
 
         # Status registers (host reads).
@@ -172,11 +176,42 @@ class GlitchInterface:
         await self._reset_assert.set(1)
 
     async def release_reset(self) -> None:
-        """Release a previously-asserted reset (drive pin high)."""
+        """Release a previously-asserted reset. The post-release pin level
+        depends on the current `reset_idle_z` setting:
+        - reset_idle_z=False (gateware default): pin is actively driven HIGH
+          (push-pull) at the rail voltage. Contends with any external driver.
+        - reset_idle_z=True: pin is released to high-Z. An external pull-up
+          or another driver sets the idle level.
+        Use `set_reset_idle_z(True)` if the reset net is shared with another
+        asserter (e.g. an AP's reset controller) — see the docstring for
+        details on why push-pull idle can wedge such targets.
+        """
         if self._reset_assert is None:
             raise GlasgowAppletError(
                 "release_reset called but no reset pin was configured")
         await self._reset_assert.set(0)
+
+    async def set_reset_idle_z(self, idle_z: bool) -> None:
+        """Configure the reset pin's idle-state drive (when reset_assert=0).
+
+        idle_z=False (gateware default): drive the pin HIGH push-pull at
+        idle. Gives a clean idle-high state right after FPGA configuration
+        — useful when the reset line is dedicated and has no other driver,
+        and you want the target out of reset as fast as possible.
+
+        idle_z=True: release the pin to high-Z at idle. Required when the
+        reset line is shared with another driver (most notably the host
+        AP's GSC reset controller on Pixel-class targets). The gateware
+        stays configured for the lifetime of the USB session, so without
+        this the pin keeps driving HIGH even after the test exits, and
+        will contend with any external assertion of the same net.
+
+        Idle behavior only — `reset_assert=1` always actively drives low.
+        """
+        if self._reset_idle_z is None:
+            raise GlasgowAppletError(
+                "set_reset_idle_z called but no reset pin was configured")
+        await self._reset_idle_z.set(int(bool(idle_z)))
 
     # ------------------------------------------------------------------
     # Arm / poll / fire
