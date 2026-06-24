@@ -10,7 +10,8 @@ import unittest
 from glasgow.applet import GlasgowAppletV2TestCase, applet_v2_simulation_test
 
 from .applet import GlitchApplet
-from .gateware import S_IDLE, S_ARMED, S_DELAY, S_PULSE, S_DONE
+from .gateware import (S_IDLE, S_ARMED, S_DELAY, S_PULSE, S_DELAY2, S_PULSE2,
+                       S_DELAY3, S_PULSE3, S_DONE)
 
 
 async def _drive_uart_byte(ctx, pin, byte, bit_cyc):
@@ -210,6 +211,159 @@ class GlitchAppletTestCase(GlasgowAppletV2TestCase, applet=GlitchApplet):
             await iface.pulse_reset(1000)
         with self.assertRaises(GlasgowAppletError):
             await iface.assert_reset()
+
+    @applet_v2_simulation_test(prepare=_prepare_idle_rx, args="--rx A0 --trigger A1 --baud 9600")
+    async def test_double_pulse_chains_through_delay2(self, applet, ctx):
+        """With pulse2_cyc > 0, FSM is PULSE → DELAY2 → PULSE2 → DONE.
+        Trigger pin asserts during both PULSE and PULSE2, idles between
+        them for DELAY2 cycles."""
+        iface = applet.glitch_iface
+        asm   = applet.assembly
+        rx    = asm.get_pin("A0")
+        trig  = asm.get_pin("A1")
+
+        DELAY_CYC  = 200
+        PULSE_CYC  = 100
+        DELAY2_CYC = 300
+        PULSE2_CYC = 150
+        await iface.set_pattern(b"X")
+        await iface.set_delay_cycles(DELAY_CYC)
+        await iface.set_pulse_cycles(PULSE_CYC)
+        await iface.set_delay2_cycles(DELAY2_CYC)
+        await iface.set_pulse2_cycles(PULSE2_CYC)
+        await iface.arm()
+        await ctx.tick()
+
+        bit_cyc = round(1 / (9600 * asm.sys_clk_period))
+        await _drive_uart_byte(ctx, rx, ord("X"), bit_cyc)
+
+        # Walk the FSM tick-by-tick. Record state transitions and
+        # count high cycles within each PULSE / PULSE2 phase to verify
+        # the pin really asserts twice with an idle gap.
+        states_seen = []
+        pulse1_high = 0
+        pulse2_high = 0
+        delay2_low  = 0
+        budget = DELAY_CYC + PULSE_CYC + DELAY2_CYC + PULSE2_CYC + 100
+        for _ in range(budget):
+            await ctx.tick()
+            st = await iface.get_state()
+            if not states_seen or states_seen[-1] != st:
+                states_seen.append(st)
+            if st == S_PULSE:
+                if ctx.get(trig.o):
+                    pulse1_high += 1
+            elif st == S_DELAY2:
+                if ctx.get(trig.o) == 0:
+                    delay2_low += 1
+            elif st == S_PULSE2:
+                if ctx.get(trig.o):
+                    pulse2_high += 1
+            if st == S_DONE:
+                break
+
+        self.assertEqual(await iface.get_state(), S_DONE)
+        # Verify the FSM visited both delay/pulse phases in order.
+        # (filter out IDLE/ARMED if present at the very start)
+        seen_after_armed = [s for s in states_seen
+                            if s not in (S_IDLE, S_ARMED)]
+        self.assertEqual(
+            seen_after_armed,
+            [S_DELAY, S_PULSE, S_DELAY2, S_PULSE2, S_DONE],
+            f"unexpected state sequence: {seen_after_armed}")
+        # Pulse-width sanity: both pulses asserted for ~their configured cycles.
+        # Allow +/- 2 cycles for sampling-edge boundary effects.
+        self.assertGreaterEqual(pulse1_high, PULSE_CYC - 2)
+        self.assertLessEqual(pulse1_high,    PULSE_CYC + 2)
+        self.assertGreaterEqual(pulse2_high, PULSE2_CYC - 2)
+        self.assertLessEqual(pulse2_high,    PULSE2_CYC + 2)
+        # DELAY2 idled the pin low for at least most of its window.
+        self.assertGreaterEqual(delay2_low, DELAY2_CYC - 2)
+        self.assertEqual(ctx.get(trig.o), 0)
+
+    @applet_v2_simulation_test(prepare=_prepare_idle_rx, args="--rx A0 --trigger A1 --baud 9600")
+    async def test_triple_pulse_chains_through_delay3(self, applet, ctx):
+        """With pulse3_cyc > 0, FSM is PULSE → DELAY2 → PULSE2 → DELAY3 → PULSE3 →
+        DONE. Trigger asserts during all three pulses, idling between them."""
+        iface = applet.glitch_iface
+        asm   = applet.assembly
+        rx    = asm.get_pin("A0")
+        trig  = asm.get_pin("A1")
+
+        DELAY_CYC, PULSE_CYC = 100, 60
+        DELAY2_CYC, PULSE2_CYC = 120, 60
+        DELAY3_CYC, PULSE3_CYC = 140, 60
+        await iface.set_pattern(b"X")
+        await iface.set_delay_cycles(DELAY_CYC)
+        await iface.set_pulse_cycles(PULSE_CYC)
+        await iface.set_delay2_cycles(DELAY2_CYC)
+        await iface.set_pulse2_cycles(PULSE2_CYC)
+        await iface.set_delay3_cycles(DELAY3_CYC)
+        await iface.set_pulse3_cycles(PULSE3_CYC)
+        await iface.arm()
+        await ctx.tick()
+
+        bit_cyc = round(1 / (9600 * asm.sys_clk_period))
+        await _drive_uart_byte(ctx, rx, ord("X"), bit_cyc)
+
+        states_seen = []
+        pulse3_high = 0
+        delay3_low  = 0
+        budget = (DELAY_CYC + PULSE_CYC + DELAY2_CYC + PULSE2_CYC
+                  + DELAY3_CYC + PULSE3_CYC + 100)
+        for _ in range(budget):
+            await ctx.tick()
+            st = await iface.get_state()
+            if not states_seen or states_seen[-1] != st:
+                states_seen.append(st)
+            if st == S_DELAY3 and ctx.get(trig.o) == 0:
+                delay3_low += 1
+            elif st == S_PULSE3 and ctx.get(trig.o):
+                pulse3_high += 1
+            if st == S_DONE:
+                break
+
+        self.assertEqual(await iface.get_state(), S_DONE)
+        seen_after_armed = [s for s in states_seen if s not in (S_IDLE, S_ARMED)]
+        self.assertEqual(
+            seen_after_armed,
+            [S_DELAY, S_PULSE, S_DELAY2, S_PULSE2, S_DELAY3, S_PULSE3, S_DONE],
+            f"unexpected state sequence: {seen_after_armed}")
+        self.assertGreaterEqual(pulse3_high, PULSE3_CYC - 2)
+        self.assertLessEqual(pulse3_high,    PULSE3_CYC + 2)
+        self.assertGreaterEqual(delay3_low, DELAY3_CYC - 2)
+        self.assertEqual(ctx.get(trig.o), 0)
+
+    @applet_v2_simulation_test(prepare=_prepare_idle_rx, args="--rx A0 --trigger A1 --baud 9600")
+    async def test_pulse2_cyc_zero_preserves_single_pulse(self, applet, ctx):
+        """pulse2_cyc=0 must keep the original single-pulse FSM: PULSE → DONE
+        directly, never entering DELAY2 / PULSE2."""
+        iface = applet.glitch_iface
+        asm   = applet.assembly
+        rx    = asm.get_pin("A0")
+
+        await iface.set_pattern(b"X")
+        await iface.set_delay_cycles(50)
+        await iface.set_pulse_cycles(50)
+        # delay2 set to a non-zero value; with pulse2=0 it must be ignored.
+        await iface.set_delay2_cycles(9999)
+        await iface.set_pulse2_cycles(0)
+        await iface.arm()
+        await ctx.tick()
+
+        bit_cyc = round(1 / (9600 * asm.sys_clk_period))
+        await _drive_uart_byte(ctx, rx, ord("X"), bit_cyc)
+
+        states_seen = set()
+        for _ in range(50 + 50 + 100):
+            await ctx.tick()
+            st = await iface.get_state()
+            states_seen.add(st)
+            if st == S_DONE:
+                break
+        self.assertEqual(await iface.get_state(), S_DONE)
+        self.assertNotIn(S_DELAY2, states_seen)
+        self.assertNotIn(S_PULSE2, states_seen)
 
     @applet_v2_simulation_test(prepare=_prepare_idle_rx, args="--rx A0 --trigger A1 --baud 9600")
     async def test_disarm_returns_to_idle(self, applet, ctx):

@@ -15,16 +15,18 @@ from glasgow.applet import GlasgowAppletError
 
 from .gateware import (
     GlitchComponent, MAX_PATTERN_LEN,
-    S_IDLE, S_ARMED, S_DELAY, S_PULSE, S_DONE,
+    S_IDLE, S_ARMED, S_DELAY, S_PULSE, S_DELAY2, S_PULSE2, S_DONE,
 )
 
 
 STATE_NAMES = {
-    S_IDLE:  "IDLE",
-    S_ARMED: "ARMED",
-    S_DELAY: "DELAY",
-    S_PULSE: "PULSE",
-    S_DONE:  "DONE",
+    S_IDLE:   "IDLE",
+    S_ARMED:  "ARMED",
+    S_DELAY:  "DELAY",
+    S_PULSE:  "PULSE",
+    S_DELAY2: "DELAY2",
+    S_PULSE2: "PULSE2",
+    S_DONE:   "DONE",
 }
 
 
@@ -59,6 +61,10 @@ class GlitchInterface:
         self._manual_cyc  = assembly.add_rw_register(component.manual_cyc)
         self._delay_cyc   = assembly.add_rw_register(component.delay_cyc)
         self._pulse_cyc   = assembly.add_rw_register(component.pulse_cyc)
+        self._delay2_cyc  = assembly.add_rw_register(component.delay2_cyc)
+        self._pulse2_cyc  = assembly.add_rw_register(component.pulse2_cyc)
+        self._delay3_cyc  = assembly.add_rw_register(component.delay3_cyc)
+        self._pulse3_cyc  = assembly.add_rw_register(component.pulse3_cyc)
         # reset_assert / reset_idle_z registers always exist at the gateware
         # level; we only bind host-visible registers when a reset pin was
         # wired in. Writes are no-ops when has_reset=False (no physical pin
@@ -120,6 +126,46 @@ class GlitchInterface:
 
     async def set_pulse_seconds(self, seconds: float) -> None:
         await self.set_pulse_cycles(round(seconds / self._sys_clk_period))
+
+    async def set_delay2_cycles(self, cycles: int) -> None:
+        """Gap from pulse-1 fall to pulse-2 rise. Only consulted when
+        pulse2 is enabled (pulse2_cycles > 0)."""
+        if not 0 <= cycles < (1 << 32):
+            raise GlasgowAppletError(f"delay2 {cycles} cycles out of range")
+        await self._delay2_cyc.set(cycles)
+
+    async def set_delay2_seconds(self, seconds: float) -> None:
+        await self.set_delay2_cycles(round(seconds / self._sys_clk_period))
+
+    async def set_pulse2_cycles(self, cycles: int) -> None:
+        """Second-pulse width. 0 disables the second pulse (single-pulse
+        behavior); >0 chains PULSE → DELAY2 → PULSE2 → DONE."""
+        if not 0 <= cycles < (1 << 32):
+            raise GlasgowAppletError(f"pulse2 width {cycles} cycles out of range")
+        await self._pulse2_cyc.set(cycles)
+
+    async def set_pulse2_seconds(self, seconds: float) -> None:
+        await self.set_pulse2_cycles(round(seconds / self._sys_clk_period))
+
+    async def set_delay3_cycles(self, cycles: int) -> None:
+        """Gap from pulse-2 fall to pulse-3 rise. Only consulted when
+        pulse3 is enabled (pulse3_cycles > 0)."""
+        if not 0 <= cycles < (1 << 32):
+            raise GlasgowAppletError(f"delay3 {cycles} cycles out of range")
+        await self._delay3_cyc.set(cycles)
+
+    async def set_delay3_seconds(self, seconds: float) -> None:
+        await self.set_delay3_cycles(round(seconds / self._sys_clk_period))
+
+    async def set_pulse3_cycles(self, cycles: int) -> None:
+        """Third-pulse width. 0 disables the third pulse (two-pulse
+        behavior); >0 chains PULSE2 → DELAY3 → PULSE3 → DONE."""
+        if not 0 <= cycles < (1 << 32):
+            raise GlasgowAppletError(f"pulse3 width {cycles} cycles out of range")
+        await self._pulse3_cyc.set(cycles)
+
+    async def set_pulse3_seconds(self, seconds: float) -> None:
+        await self.set_pulse3_cycles(round(seconds / self._sys_clk_period))
 
     async def set_polarity(self, active_low: bool) -> None:
         """0 / False = active-high pulse (idle low). 1 / True = active-low (idle high)."""

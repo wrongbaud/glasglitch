@@ -17,11 +17,15 @@ MAX_PATTERN_LEN = 16
 
 
 # Glitch FSM states, exposed as Out(3) so the host can poll progress.
-S_IDLE  = 0
-S_ARMED = 1
-S_DELAY = 2
-S_PULSE = 3
-S_DONE  = 4
+S_IDLE   = 0
+S_ARMED  = 1
+S_DELAY  = 2
+S_PULSE  = 3
+S_DELAY2 = 4
+S_PULSE2 = 5
+S_DONE   = 6
+S_DELAY3 = 7
+S_PULSE3 = 8
 
 
 class GlitchComponent(wiring.Component):
@@ -68,9 +72,21 @@ class GlitchComponent(wiring.Component):
     manual_cyc:   In(20)                     # UART bit period in sys clocks
     delay_cyc:    In(32)                     # cycles between match and pulse rise
     pulse_cyc:    In(32)                     # pulse width in cycles
+    delay2_cyc:   In(32)                     # cycles between pulse-1 fall and
+                                             # pulse-2 rise. Only consulted if
+                                             # pulse2_cyc != 0.
+    pulse2_cyc:   In(32)                     # second pulse width in cycles.
+                                             # 0 disables the second pulse
+                                             # (FSM goes straight to DONE).
+    delay3_cyc:   In(32)                     # cycles between pulse-2 fall and
+                                             # pulse-3 rise. Only consulted if
+                                             # pulse3_cyc != 0.
+    pulse3_cyc:   In(32)                     # third pulse width in cycles.
+                                             # 0 disables the third pulse
+                                             # (FSM stops after PULSE2 → DONE).
 
     # --- Host-observable (Out) ---
-    state:       Out(3)
+    state:       Out(4)                       # widened for DELAY3(7)/PULSE3(8)
     match_count: Out(16)                     # increments each time a match fires
     rx_errors:   Out(16)                     # UART framing/parity/overflow count
 
@@ -246,6 +262,59 @@ class GlitchComponent(wiring.Component):
             with m.State("PULSE"):
                 m.d.comb += [
                     self.state.eq(S_PULSE),
+                    trigger_active.eq(1),
+                ]
+                with m.If(pulse_counter == 0):
+                    # If a second pulse is configured, chain through DELAY2 /
+                    # PULSE2; otherwise finish. pulse2_cyc=0 preserves the
+                    # original single-pulse behavior exactly.
+                    with m.If(self.pulse2_cyc != 0):
+                        m.d.sync += delay_counter.eq(self.delay2_cyc)
+                        m.next = "DELAY2"
+                    with m.Else():
+                        m.next = "DONE"
+                with m.Else():
+                    m.d.sync += pulse_counter.eq(pulse_counter - 1)
+
+            with m.State("DELAY2"):
+                m.d.comb += self.state.eq(S_DELAY2)
+                with m.If(~self.arm):
+                    m.next = "IDLE"
+                with m.Elif(delay_counter == 0):
+                    m.d.sync += pulse_counter.eq(self.pulse2_cyc)
+                    m.next = "PULSE2"
+                with m.Else():
+                    m.d.sync += delay_counter.eq(delay_counter - 1)
+
+            with m.State("PULSE2"):
+                m.d.comb += [
+                    self.state.eq(S_PULSE2),
+                    trigger_active.eq(1),
+                ]
+                with m.If(pulse_counter == 0):
+                    # Chain to a third pulse if configured; else finish.
+                    # pulse3_cyc=0 preserves the two-pulse behavior exactly.
+                    with m.If(self.pulse3_cyc != 0):
+                        m.d.sync += delay_counter.eq(self.delay3_cyc)
+                        m.next = "DELAY3"
+                    with m.Else():
+                        m.next = "DONE"
+                with m.Else():
+                    m.d.sync += pulse_counter.eq(pulse_counter - 1)
+
+            with m.State("DELAY3"):
+                m.d.comb += self.state.eq(S_DELAY3)
+                with m.If(~self.arm):
+                    m.next = "IDLE"
+                with m.Elif(delay_counter == 0):
+                    m.d.sync += pulse_counter.eq(self.pulse3_cyc)
+                    m.next = "PULSE3"
+                with m.Else():
+                    m.d.sync += delay_counter.eq(delay_counter - 1)
+
+            with m.State("PULSE3"):
+                m.d.comb += [
+                    self.state.eq(S_PULSE3),
                     trigger_active.eq(1),
                 ]
                 with m.If(pulse_counter == 0):
